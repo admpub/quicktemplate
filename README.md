@@ -1,7 +1,6 @@
 [![Build Status](https://travis-ci.org/valyala/quicktemplate.svg)](https://travis-ci.org/valyala/quicktemplate)
 [![GoDoc](https://godoc.org/github.com/valyala/quicktemplate?status.svg)](http://godoc.org/github.com/valyala/quicktemplate)
-[![Coverage](http://gocover.io/_badge/github.com/valyala/quicktemplate)](http://gocover.io/github.com/valyala/quicktemplate)
-[![Go Report](http://goreportcard.com/badge/valyala/quicktemplate)](http://goreportcard.com/report/valyala/quicktemplate)
+[![Go Report Card](https://goreportcard.com/badge/github.com/valyala/quicktemplate)](https://goreportcard.com/report/github.com/valyala/quicktemplate)
 
 # quicktemplate
 
@@ -13,11 +12,14 @@ Inspired by [mako templates](http://www.makotemplates.org/) philosophy.
 
   * [Extremely fast](#performance-comparison-with-htmltemplate).
     Templates are converted into Go code and then compiled.
+  * Almost all the bugs are caught during template compilation, so production
+    suffers less from template-related bugs.
   * Easy to use. See [quickstart](#quick-start) and [examples](https://github.com/valyala/quicktemplate/tree/master/examples)
     for details.
   * Powerful. Arbitrary Go code may be embedded into and mixed with templates.
     Be careful with this power - do not query db and/or external resources from
-    templates unless you miss php way in Go :)
+    templates unless you miss php way in Go :) This power is mostly for
+    arbitrary data transformations.
   * Easy to understand template inheritance powered by [Go interfaces](https://golang.org/doc/effective_go.html#interfaces).
     See [this example](https://github.com/valyala/quicktemplate/tree/master/examples/basicserver) for details.
   * Templates are compiled into a single binary, so there is no need in copying
@@ -41,18 +43,30 @@ The following simple template is used in the benchmark:
 Benchmark results:
 
 ```
-$ go test -bench=Template -benchmem
-BenchmarkQuickTemplate1-4  	10000000	       158 ns/op	       0 B/op	       0 allocs/op
-BenchmarkQuickTemplate10-4 	 2000000	       604 ns/op	       0 B/op	       0 allocs/op
-BenchmarkQuickTemplate100-4	  300000	      5498 ns/op	       0 B/op	       0 allocs/op
-BenchmarkHTMLTemplate1-4   	  500000	      2807 ns/op	     752 B/op	      23 allocs/op
-BenchmarkHTMLTemplate10-4  	  100000	     13527 ns/op	    3521 B/op	     117 allocs/op
-BenchmarkHTMLTemplate100-4 	   10000	    133503 ns/op	   34499 B/op	    1152 allocs/op
+$ go test -bench=Template -benchmem github.com/valyala/quicktemplate/tests
+BenchmarkQuickTemplate1-4                 	10000000	       120 ns/op	       0 B/op	       0 allocs/op
+BenchmarkQuickTemplate10-4                	 3000000	       441 ns/op	       0 B/op	       0 allocs/op
+BenchmarkQuickTemplate100-4               	  300000	      3945 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHTMLTemplate1-4                  	  500000	      2501 ns/op	     752 B/op	      23 allocs/op
+BenchmarkHTMLTemplate10-4                 	  100000	     12442 ns/op	    3521 B/op	     117 allocs/op
+BenchmarkHTMLTemplate100-4                	   10000	    123392 ns/op	   34498 B/op	    1152 allocs/op
 ```
+
+[goTemplateBenchmark](https://github.com/SlinSo/goTemplateBenchmark) compares QuickTemplate with numerous go templating packages. QuickTemplate performs favorably.
 
 # Security
 
-By default all the template placeholders are html-escaped.
+  * All the template placeholders are html-escaped by default.
+  * Template placeholders for JSON strings prevents from `</script>`-based
+    XSS attacks:
+
+  ```qtpl
+  {% func FailedXSS() %}
+  <script>
+      var s = {%q= "</script><script>alert('you pwned!')" %};
+  </script>
+  {% endfunc %}
+  ```
 
 # Examples
 
@@ -113,7 +127,7 @@ Then run `go run`. If all went ok, you'll see something like this:
 ```
 
 Let's create more complex template, which calls other template functions,
-contains loops, conditions, breaks and returns.
+contains loops, conditions, breaks, continue and returns.
 Put the following template into `templates/greetings.qtpl`:
 
 ```qtpl
@@ -132,7 +146,8 @@ It also greets John differently comparing to others.
 			{% break %}
 		{% elseif name == "John" %}
 			{%= sayHi("Mr. " + name) %}
-		{% else %}
+			{% continue %}
+		{% else%}
 			{%= Hello(name) %}
 		{% endif %}
 	{% endfor %}
@@ -187,13 +202,16 @@ The `{%s x %}` is used for printing html-safe strings, while `{%= F() %}`
 is used for embedding template function calls. Quicktemplate supports also
 other output tags:
 
-  * `{%d num %}` for integers
-  * `{%f float %}` for float64
-  * `{%z bytes %}` for byte slices
-  * `{%q str %}` for json-compatible quoted strings.
-  * `{%j str %}` for embedding str into json string. Unlike `{%q str %}`
+  * `{%d num %}` for integers.
+  * `{%f float %}` for float64.
+    Floating point precision may be set via `{%f.precision float %}`.
+    For example, `{%f.2 1.2345 %}` outputs `1.23`.
+  * `{%z bytes %}` for byte slices.
+  * `{%q str %}` and `{%qz bytes %}` for json-compatible quoted strings.
+  * `{%j str %}` and `{%jz bytes %}` for embedding str into json string. Unlike `{%q str %}`
     it doesn't quote the string.
-  * `{%u str %}` for [URL encoding](https://en.wikipedia.org/wiki/Percent-encoding) the given str.
+  * `{%u str %}` and `{%uz bytes %}` for [URL encoding](https://en.wikipedia.org/wiki/Percent-encoding)
+    the given str.
   * `{%v anything %}` is equivalent to `%v` in [printf-like functions](https://golang.org/pkg/fmt/).
 
 All these output tags produce html-safe output, i.e. they escape `<` to `&lt;`,
@@ -276,6 +294,21 @@ There are other useful tags supported by quicktemplate:
     or is used</div></div>
     ```
 
+  * `{% switch %}`, `{% case %}` and `{% default %}`:
+
+
+    ```qtpl
+    1 + 1 =
+    {% switch 1+1 %}
+    {% case 2 %}
+	2?
+    {% case 42 %}
+	42!
+    {% default %}
+        I don't know :(
+    {% endswitch %}
+    ```
+
   * `{% code %}`:
 
     ```qtpl
@@ -325,15 +358,15 @@ There are other useful tags supported by quicktemplate:
     Base page implementation
     {% code
     type BasePage struct {
-        Title string
-        Footer string
+        TitleStr string
+        FooterStr string
     }
     %}
-    {% func (bp *BasePage) Title() %}{%s bp.Title %}{% endfunc %}
+    {% func (bp *BasePage) Title() %}{%s bp.TitleStr %}{% endfunc %}
     {% func (bp *BasePage) Body(s string, n int) %}
         <b>s={%q s %}, n={%d n %}</b>
     {% endfunc %}
-    {% func (bp *BasePage) Footer() %}{%s bp.Footer %}{% endfunc %}
+    {% func (bp *BasePage) Footer() %}{%s bp.FooterStr %}{% endfunc %}
 
     Main page implementation
     {% code
@@ -342,14 +375,15 @@ There are other useful tags supported by quicktemplate:
         BasePage
 
         // real body for main page
-        Body string
+        BodyStr string
     }
+    %}
 
     Override only Body
     Title and Footer are used from BasePage.
     {% func (mp *MainPage) Body(s string, n int) %}
         <div>
-            main body: {%s mp.Body %}
+            main body: {%s mp.BodyStr %}
         </div>
         <div>
             base body: {%= mp.BasePage.Body(s, n) %}
@@ -360,6 +394,155 @@ There are other useful tags supported by quicktemplate:
     See [basicserver example](https://github.com/valyala/quicktemplate/tree/master/examples/basicserver)
     for more details.
 
+
+# Performance optimization tips
+
+  * Prefer calling `WriteFoo` instead of `Foo` when generating template output
+    for `{% func Foo() %}`. This avoids unnesessary memory allocation and a copy
+    for a `string` returned from `Foo()`.
+
+  * Prefer `{%= Foo() %}` instead of `{%s= Foo() %}` when embedding
+    a function template `{% func Foo() %}`. Though both approaches generate
+    identical output, the first approach is optimized for speed.
+
+  * Prefer using existing output tags instead of passing `fmt.Sprintf`
+    to `{%s %}`. For instance, use `{%d num %}` instead
+    of `{%s fmt.Sprintf("%d", num) %}`, because the first approach is optimized
+    for speed.
+
+  * Prefer using specific output tags instead of generic output tag
+    `{%v %}`. For instance, use `{%s str %}` instead of `{%v str %}`, since
+    specific output tags are optimized for speed.
+
+  * Prefer creating custom function templates instead of composing complex
+    strings by hands before passing them to `{%s %}`.
+    For instance, the first approach is slower than the second one:
+
+    ```qtpl
+    {% func Foo(n int) %}
+        {% code
+        // construct complex string
+        complexStr := ""
+        for i := 0; i < n; i++ {
+            complexStr += fmt.Sprintf("num %d,", i)
+        }
+        %}
+        complex string = {%s= complexStr %}
+    {% endfunc %}
+    ```
+
+    ```qtpl
+    {% func Foo(n int) %}
+        complex string = {%= complexStr(n) %}
+    {% endfunc %}
+
+    // Wrap complexStr func into stripspace for stripping unnesessary space
+    // between tags and lines.
+    {% stripspace %}
+    {% func complexStr(n int) %}
+        {% for i := 0; i < n; i++ %}
+            num{% space %}{%d i %}{% newline %}
+        {% endfor %}
+    {% endfunc %}
+    {% endstripspace %}
+    ```
+
+  * Make sure that the `io.Writer` passed to `Write*` functions
+    is [buffered](https://golang.org/pkg/bufio/#Writer).
+    This will minimize the number of `write`
+    [syscalls](https://en.wikipedia.org/wiki/System_call),
+    which may be quite expensive.
+
+    Note: There is no need in wrapping [fasthttp.RequestCtx](https://godoc.org/github.com/valyala/fasthttp#RequestCtx)
+    into [bufio.Writer](https://golang.org/pkg/bufio/#Writer), since it is already buffered.
+
+  * [Profile](http://blog.golang.org/profiling-go-programs) your programs
+    for memory allocations and fix top functions from
+    `go tool pprof --alloc_objects` output.
+
+
+# Use cases
+
+While the main quicktemplate purpose is generating html, it may be used
+for generating other data too. For example, JSON and XML marshaling may
+be easily implemented with quicktemplate:
+
+```qtpl
+{% code
+type MarshalRow struct {
+	Msg string
+	N int
+}
+
+type MarshalData struct {
+	Foo int
+	Bar string
+	Rows []MarshalRow
+}
+%}
+
+// JSON marshaling
+{% stripspace %}
+{% func (d *MarshalData) JSON() %}
+{
+	"Foo": {%d d.Foo %},
+	"Bar": {%q= d.Bar %},
+	"Rows":[
+		{% for i, r := range d.Rows %}
+			{
+				"Msg": {%q= r.Msg %},
+				"N": {%d r.N %}
+			}
+			{% if i + 1 < len(d.Rows) %},{% endif %}
+		{% endfor %}
+	]
+}
+{% endfunc %}
+{% endstripspace %}
+
+// XML marshaling
+{% stripspace %}
+{% func (d *MarshalData) XML() %}
+<MarshalData>
+	<Foo>{%d d.Foo %}</Foo>
+	<Bar>{%s d.Bar %}</Bar>
+	<Rows>
+	{% for _, r := range d.Rows %}
+		<Row>
+			<Msg>{%s r.Msg %}</Msg>
+			<N>{%d r.N %}</N>
+		</Row>
+	{% endfor %}
+	</Rows>
+</MarshalData>
+{% endfunc %}
+{% endstripspace %}
+```
+
+Usually marshaling built with quicktemplate works faster than the marshaling
+implemented via standard [encoding/json](https://golang.org/pkg/encoding/json/)
+and [encoding/xml](https://golang.org/pkg/encoding/xml/).
+The corresponding benchmark results:
+
+```
+go test -bench=Marshal -benchmem github.com/valyala/quicktemplate/tests
+BenchmarkMarshalJSONStd1-4                	 3000000	       480 ns/op	       8 B/op	       1 allocs/op
+BenchmarkMarshalJSONStd10-4               	 1000000	      1842 ns/op	       8 B/op	       1 allocs/op
+BenchmarkMarshalJSONStd100-4              	  100000	     15820 ns/op	       8 B/op	       1 allocs/op
+BenchmarkMarshalJSONStd1000-4             	   10000	    159327 ns/op	      59 B/op	       1 allocs/op
+BenchmarkMarshalJSONQuickTemplate1-4      	10000000	       162 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalJSONQuickTemplate10-4     	 2000000	       748 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalJSONQuickTemplate100-4    	  200000	      6572 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalJSONQuickTemplate1000-4   	   20000	     66784 ns/op	      29 B/op	       0 allocs/op
+BenchmarkMarshalXMLStd1-4                 	 1000000	      1652 ns/op	       2 B/op	       2 allocs/op
+BenchmarkMarshalXMLStd10-4                	  200000	      7533 ns/op	      11 B/op	      11 allocs/op
+BenchmarkMarshalXMLStd100-4               	   20000	     65763 ns/op	     195 B/op	     101 allocs/op
+BenchmarkMarshalXMLStd1000-4              	    2000	    663373 ns/op	    3522 B/op	    1002 allocs/op
+BenchmarkMarshalXMLQuickTemplate1-4       	10000000	       145 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalXMLQuickTemplate10-4      	 3000000	       597 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalXMLQuickTemplate100-4     	  300000	      5833 ns/op	       0 B/op	       0 allocs/op
+BenchmarkMarshalXMLQuickTemplate1000-4    	   30000	     53000 ns/op	      32 B/op	       0 allocs/op
+```
 
 # FAQ
 

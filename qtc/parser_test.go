@@ -10,6 +10,145 @@ import (
 	"github.com/valyala/quicktemplate"
 )
 
+func TestParseUnexpectedValueAfterTag(t *testing.T) {
+	// endfunc
+	testParseSuccess(t, "{% func a() %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% endfunc foo bar %}")
+
+	// endfor
+	testParseSuccess(t, "{% func a() %}{% for %}{% endfor %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% for %}{% endfor foo bar %}{% endfunc %}")
+
+	// endif
+	testParseSuccess(t, "{% func a() %}{% if true %}{% endif %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% if true %}{% endif foo bar %}{% endfunc %}")
+
+	// endswitch
+	testParseSuccess(t, "{% func a() %}{% switch %}{% case true %}{% endswitch %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% switch %}{% case true %}{% endswitch foobar %}{% endfunc %}")
+
+	// else
+	testParseSuccess(t, "{% func a() %}{% if true %}{% else %}{% endif %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% if true %}{% else foo bar %}{% endif %}{% endfunc %}")
+
+	// return
+	testParseSuccess(t, "{% func a() %}{% return %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% return foobar %}{% endfunc %}")
+
+	// break
+	testParseSuccess(t, "{% func a() %}{% for %}{% break %}{% endfor %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% for %}{% break foobar %}{% endfor %}{% endfunc %}")
+
+	// default
+	testParseSuccess(t, "{% func a() %}{% switch %}{% default %}{% endswitch %}{% endfunc %}")
+	testParseFailure(t, "{% func a() %}{% switch %}{% default foobar %}{% endswitch %}{% endfunc %}")
+}
+
+func TestParseFPrecFailure(t *testing.T) {
+	// negative precision
+	testParseFailure(t, "{% func a()%}{%f.-1 1.2 %}{% endfunc %}")
+
+	// non-numeric precision
+	testParseFailure(t, "{% func a()%}{%f.foo 1.2 %}{% endfunc %}")
+
+	// more than one dot
+	testParseFailure(t, "{% func a()%}{%f.1.234 1.2 %}{% endfunc %}")
+	testParseFailure(t, "{% func a()%}{%f.1.foo 1.2 %}{% endfunc %}")
+}
+
+func TestParseFPrecSuccess(t *testing.T) {
+	// no precision
+	testParseSuccess(t, "{% func a()%}{%f 1.2 %}{% endfunc %}")
+	testParseSuccess(t, "{% func a()%}{%f= 1.2 %}{% endfunc %}")
+
+	// precision set
+	testParseSuccess(t, "{% func a()%}{%f.1 1.234 %}{% endfunc %}")
+	testParseSuccess(t, "{% func a()%}{%f.10= 1.234 %}{% endfunc %}")
+
+	// missing precision
+	testParseSuccess(t, "{% func a()%}{%f. 1.234 %}{% endfunc %}")
+	testParseSuccess(t, "{% func a()%}{%f.= 1.234 %}{% endfunc %}")
+}
+
+func TestParseSwitchCaseSuccess(t *testing.T) {
+	// single-case switch
+	testParseSuccess(t, "{%func a()%}{%switch n%}{%case 1%}aaa{%endswitch%}{%endfunc%}")
+
+	// multi-case switch
+	testParseSuccess(t, "{%func a()%}{%switch%}\n\t  {%case foo()%}\nfoobar{%case bar()%}{%endswitch%}{%endfunc%}")
+
+	// default statement
+	testParseSuccess(t, "{%func a()%}{%switch%}{%default%}{%endswitch%}{%endfunc%}")
+
+	// switch with break
+	testParseSuccess(t, "{%func a()%}{%switch n%}{%case 1%}aaa{%break%}ignore{%endswitch%}{%endfunc%}")
+
+	// complex switch
+	testParseSuccess(t, `{%func f()%}{% for %}
+		{%switch foo() %}
+		The text before the first case
+		is converted into a comment
+		{%case "foobar" %}
+			{% switch %}
+			{% case bar() %}
+				aaaa{% break %}
+				ignore this line
+			{% case baz() %}
+				bbbb
+			{% endswitch %}
+		{% case "aaa" %}
+			{% for i := 0; i < 10; i++ %}
+				foobar
+			{% endfor %}
+		{% case "qwe" %}
+			aaaa
+			{% return %}
+		{% case "www" %}
+			break from the switch
+			{% break %}
+		{% default %}
+			foobar
+		{%endswitch%}
+		{% if 42 == 2 %}
+			break for the loop
+			{% break %}
+			ignore this
+		{% endif %}
+	{% endfor %}{%endfunc%}`)
+}
+
+func TestParseSwitchCaseFailure(t *testing.T) {
+	// missing endswitch
+	testParseFailure(t, "{%func a()%}{%switch%}{%endfunc%}")
+
+	// empty switch
+	testParseFailure(t, "{%func f()%}{%switch%}{%endswitch%}{%endfunc%}")
+
+	// case outside switch
+	testParseFailure(t, "{%func f()%}{%case%}{%endfunc%}")
+
+	// the first tag inside switch is non-case
+	testParseFailure(t, "{%func f()%}{%switch%}{%return%}{%endswitch%}{%endfunc%}")
+	testParseFailure(t, "{%func F()%}{%switch%}{%break%}{%endswitch%}{%endfunc%}")
+	testParseFailure(t, "{%func f()%}{%switch 1%}{%return%}{%case 1%}aaa{%endswitch%}{%endfunc%}")
+
+	// empty case
+	testParseFailure(t, "{%func f()%}{%switch%}{%case%}aaa{%endswitch%}{%endfunc%}")
+
+	// multiple default statements
+	testParseFailure(t, "{%func f()%}{%switch%}{%case%}aaa{%default%}bbb{%default%}{%endswitch%}{%endfunc%}")
+}
+
+func TestParseBreakContinueReturn(t *testing.T) {
+	testParseSuccess(t, `{% func a() %}{% for %}{% continue %}{% break %}{% return %}{% endfor %}{% endfunc %}`)
+	testParseSuccess(t, `{% func a() %}{% for %}
+		{% if f1() %}{% continue %}skip this{%s "and this" %}{% endif %}
+		{% if f2() %}{% break %}{% for %}{% endfor %}skip this{% endif %}
+		{% if f3() %}{% return %}foo{% if f4() %}{% for %}noop{% endfor %}{% endif %}bar skip this{% endif %}
+		text
+	{% endfor %}{% endfunc %}`)
+}
+
 func TestParseOutputTagSuccess(t *testing.T) {
 	// identifier
 	testParseSuccess(t, "{%func a()%}{%s foobar %}{%endfunc%}")
@@ -188,6 +327,9 @@ func TestParseFailure(t *testing.T) {
 	// empty if condition
 	testParseFailure(t, "{% func a() %}{% if    %}aaaa{% endif %}{% endfunc %}")
 
+	// else with content
+	testParseFailure(t, "{% func a() %}{% if 3 == 4%}aaaa{% else if 3 ==  5 %}bug{% endif %}{% endfunc %}")
+
 	// missing endif
 	testParseFailure(t, "{%func a() %}{%if foo %}aaa{% endfunc %}")
 
@@ -295,16 +437,20 @@ func TestParserSuccess(t *testing.T) {
 	%}{%endfunc%}`)
 
 	// break inside for loop
-	testParseSuccess(t, `{%func f()%}{%for%}{%code
-		if a() {
-			break
-		} else {
-			return
-		}
-	%}{%endfor%}{%endfunc%}`)
+	testParseSuccess(t, `{%func f()%}{%for%}
+		{% if a() %}
+			{% break
+  	 %}
+		{% 	
+else   
+%}
+			{% return   %}
+		{% endif %}
+	{%endfor%}{%endfunc%}`)
 
 	// interface
 	testParseSuccess(t, "{%interface Foo { Bar()\nBaz() } %}")
+	testParseSuccess(t, "{%iface Foo { Bar()\nBaz() } %}")
 
 	// method
 	testParseSuccess(t, "{%func (s *S) Foo(bar, baz string) %}{%endfunc%}")

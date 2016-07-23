@@ -50,8 +50,8 @@ func AcquireWriter(w io.Writer) *Writer {
 // Do not access released writer, otherwise data races may occur.
 func ReleaseWriter(qw *Writer) {
 	releaseHTMLEscapeWriter(qw.e.w)
-	qw.e.w = nil
-	qw.n.w = nil
+	qw.e.Reset()
+	qw.n.Reset()
 	writerPool.Put(qw)
 }
 
@@ -59,62 +59,118 @@ var writerPool sync.Pool
 
 // QWriter is auxiliary writer used by Writer.
 type QWriter struct {
-	w io.Writer
+	w   io.Writer
+	err error
+}
+
+// Write implements io.Writer.
+func (w *QWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n, err := w.w.Write(p)
+	if err != nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// Reset resets QWriter to the original state.
+func (w *QWriter) Reset() {
+	w.w = nil
+	w.err = nil
 }
 
 // S writes s to w.
 func (w *QWriter) S(s string) {
-	w.w.Write(unsafeStrToBytes(s))
+	w.Write(unsafeStrToBytes(s))
 }
 
 // Z writes z to w.
 func (w *QWriter) Z(z []byte) {
-	w.w.Write(z)
+	w.Write(z)
+}
+
+// SZ is a synonym to Z.
+func (w *QWriter) SZ(z []byte) {
+	w.Write(z)
 }
 
 // D writes n to w.
 func (w *QWriter) D(n int) {
-	bb := AcquireByteBuffer()
-	bb.B = strconv.AppendInt(bb.B, int64(n), 10)
-	w.w.Write(bb.B)
-	ReleaseByteBuffer(bb)
+	w.writeQuick(func(dst []byte) []byte {
+		return strconv.AppendInt(dst, int64(n), 10)
+	})
 }
 
 // F writes f to w.
 func (w *QWriter) F(f float64) {
-	bb := AcquireByteBuffer()
-	bb.B = strconv.AppendFloat(bb.B, f, 'f', -1, 64)
-	w.w.Write(bb.B)
-	ReleaseByteBuffer(bb)
+	w.FPrec(f, -1)
+}
+
+// FPrec writes f to w using the given floating point precision.
+func (w *QWriter) FPrec(f float64, prec int) {
+	w.writeQuick(func(dst []byte) []byte {
+		return strconv.AppendFloat(dst, f, 'f', prec, 64)
+	})
 }
 
 // Q writes quoted json-safe s to w.
 func (w *QWriter) Q(s string) {
-	bb := AcquireByteBuffer()
-	bb.B = appendJSONString(bb.B, s)
-	w.w.Write(bb.B)
-	ReleaseByteBuffer(bb)
+	w.Write(strQuote)
+	writeJSONString(w, s)
+	w.Write(strQuote)
+}
+
+var strQuote = []byte(`"`)
+
+// QZ writes quoted json-safe z to w.
+func (w *QWriter) QZ(z []byte) {
+	w.Q(unsafeBytesToStr(z))
 }
 
 // J writes json-safe s to w.
 //
 // Unlike Q it doesn't qoute resulting s.
 func (w *QWriter) J(s string) {
-	bb := AcquireByteBuffer()
-	bb.B = appendJSONString(bb.B, s)
-	w.w.Write(bb.B[1 : len(bb.B)-1])
-	ReleaseByteBuffer(bb)
+	writeJSONString(w, s)
+}
+
+// JZ writes json-safe z to w.
+//
+// Unlike Q it doesn't qoute resulting z.
+func (w *QWriter) JZ(z []byte) {
+	w.J(unsafeBytesToStr(z))
 }
 
 // V writes v to w.
 func (w *QWriter) V(v interface{}) {
-	fmt.Fprintf(w.w, "%v", v)
+	fmt.Fprintf(w, "%v", v)
 }
 
 // U writes url-encoded s to w.
 func (w *QWriter) U(s string) {
-	bb := AcquireByteBuffer()
-	bb.B = appendURLEncode(bb.B, s)
-	w.w.Write(bb.B)
-	ReleaseByteBuffer(bb)
+	w.writeQuick(func(dst []byte) []byte {
+		return appendURLEncode(dst, s)
+	})
+}
+
+// UZ writes url-encoded z to w.
+func (w *QWriter) UZ(z []byte) {
+	w.U(unsafeBytesToStr(z))
+}
+
+func (w *QWriter) writeQuick(f func(dst []byte) []byte) {
+	if w.err != nil {
+		return
+	}
+	bb, ok := w.w.(*ByteBuffer)
+	if !ok {
+		bb = AcquireByteBuffer()
+	}
+	bb.B = f(bb.B)
+	if !ok {
+		w.Write(bb.B)
+		ReleaseByteBuffer(bb)
+	}
 }

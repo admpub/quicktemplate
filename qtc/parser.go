@@ -8,6 +8,7 @@ import (
 	gotoken "go/token"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -17,6 +18,7 @@ type parser struct {
 	packageName       string
 	prefix            string
 	forDepth          int
+	switchDepth       int
 	skipOutputDepth   int
 	importsUseEmitted bool
 }
@@ -39,11 +41,11 @@ func (p *parser) parseTemplate() error {
 		filepath.Base(s.filePath))
 	p.Printf("package %s\n", p.packageName)
 	p.Printf(`import (
-	qtio422016 "io"
+	qtio%s "io"
 
-	qt422016 "github.com/valyala/quicktemplate"
+	qt%s "github.com/valyala/quicktemplate"
 )
-`)
+`, mangleSuffix, mangleSuffix)
 	for s.Next() {
 		t := s.Token()
 		switch t.ID {
@@ -60,7 +62,7 @@ func (p *parser) parseTemplate() error {
 			} else {
 				p.emitImportsUse()
 				switch string(t.Value) {
-				case "interface":
+				case "interface", "iface":
 					if err := p.parseInterface(); err != nil {
 						return err
 					}
@@ -124,10 +126,10 @@ func (p *parser) emitImportsUse() {
 		return
 	}
 	p.Printf(`var (
-	_ = qtio422016.Copy
-	_ = qt422016.AcquireByteBuffer
+	_ = qtio%s.Copy
+	_ = qt%s.AcquireByteBuffer
 )
-`)
+`, mangleSuffix, mangleSuffix)
 	p.importsUseEmitted = true
 }
 
@@ -224,6 +226,141 @@ func (p *parser) parseFor() error {
 	return fmt.Errorf("cannot find endfor tag for %q at %s", forStr, s.Context())
 }
 
+func (p *parser) parseDefault() error {
+	s := p.s
+	if err := skipTagContents(s); err != nil {
+		return err
+	}
+	stmtStr := "default"
+	p.Printf("default:")
+	p.prefix += "\t"
+	for s.Next() {
+		t := s.Token()
+		switch t.ID {
+		case text:
+			p.emitText(t.Value)
+		case tagName:
+			ok, err := p.tryParseCommonTags(t.Value)
+			if err != nil {
+				return fmt.Errorf("error in %q: %s", stmtStr, err)
+			}
+			if !ok {
+				s.Rewind()
+				p.prefix = p.prefix[1:]
+				return nil
+			}
+		default:
+			return fmt.Errorf("unexpected token found when parsing %q: %s at %s", stmtStr, t, s.Context())
+		}
+	}
+	if err := s.LastError(); err != nil {
+		return fmt.Errorf("cannot parse %q: %s", stmtStr, err)
+	}
+	return fmt.Errorf("cannot find end of %q at %s", stmtStr, s.Context())
+}
+
+func (p *parser) parseCase() error {
+	s := p.s
+	t, err := expectTagContents(s)
+	if err != nil {
+		return err
+	}
+	caseStr := "case " + string(t.Value)
+	if err = validateCaseStmt(t.Value); err != nil {
+		return fmt.Errorf("invalid statement %q at %s: %s", caseStr, s.Context(), err)
+	}
+	p.Printf("case %s:", t.Value)
+	p.prefix += "\t"
+	for s.Next() {
+		t := s.Token()
+		switch t.ID {
+		case text:
+			p.emitText(t.Value)
+		case tagName:
+			ok, err := p.tryParseCommonTags(t.Value)
+			if err != nil {
+				return fmt.Errorf("error in %q: %s", caseStr, err)
+			}
+			if !ok {
+				s.Rewind()
+				p.prefix = p.prefix[1:]
+				return nil
+			}
+		default:
+			return fmt.Errorf("unexpected token found when parsing %q: %s at %s", caseStr, t, s.Context())
+		}
+	}
+	if err := s.LastError(); err != nil {
+		return fmt.Errorf("cannot parse %q: %s", caseStr, err)
+	}
+	return fmt.Errorf("cannot find end of %q at %s", caseStr, s.Context())
+}
+
+func (p *parser) parseSwitch() error {
+	s := p.s
+	t, err := expectTagContents(s)
+	if err != nil {
+		return err
+	}
+	switchStr := "switch " + string(t.Value)
+	if err = validateSwitchStmt(t.Value); err != nil {
+		return fmt.Errorf("invalid statement %q at %s: %s", switchStr, s.Context(), err)
+	}
+	p.Printf("switch %s {", t.Value)
+	caseNum := 0
+	defaultFound := false
+	p.switchDepth++
+	for s.Next() {
+		t := s.Token()
+		switch t.ID {
+		case text:
+			if caseNum == 0 {
+				comment := stripLeadingSpace(t.Value)
+				if len(comment) > 0 {
+					p.emitComment(comment)
+				}
+			} else {
+				p.emitText(t.Value)
+			}
+		case tagName:
+			switch string(t.Value) {
+			case "endswitch":
+				if caseNum == 0 {
+					return fmt.Errorf("empty statement %q found at %s", switchStr, s.Context())
+				}
+				if err = skipTagContents(s); err != nil {
+					return err
+				}
+				p.switchDepth--
+				p.Printf("}")
+				return nil
+			case "case":
+				caseNum++
+				if err = p.parseCase(); err != nil {
+					return err
+				}
+			case "default":
+				if defaultFound {
+					return fmt.Errorf("duplicate default tag found in %q at %s", switchStr, s.Context())
+				}
+				defaultFound = true
+				caseNum++
+				if err = p.parseDefault(); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("unexpected tag found in %q: %q at %s", switchStr, t.Value, s.Context())
+			}
+		default:
+			return fmt.Errorf("unexpected token found when parsing %q: %s at %s", switchStr, t, s.Context())
+		}
+	}
+	if err := s.LastError(); err != nil {
+		return fmt.Errorf("cannot parse %q: %s", switchStr, err)
+	}
+	return fmt.Errorf("cannot find endswitch tag for %q at %s", switchStr, s.Context())
+}
+
 func (p *parser) parseIf() error {
 	s := p.s
 	t, err := expectTagContents(s)
@@ -299,10 +436,12 @@ func (p *parser) parseIf() error {
 
 func (p *parser) tryParseCommonTags(tagBytes []byte) (bool, error) {
 	s := p.s
-	tagNameStr := string(tagBytes)
+	tagNameStr, prec := splitTagNamePrec(string(tagBytes))
 	switch tagNameStr {
 	case "s", "v", "d", "f", "q", "z", "j", "u",
-		"s=", "v=", "d=", "f=", "q=", "z=", "j=", "u=":
+		"s=", "v=", "d=", "f=", "q=", "z=", "j=", "u=",
+		"sz", "qz", "jz", "uz",
+		"sz=", "qz=", "jz=", "uz=":
 		t, err := expectTagContents(s)
 		if err != nil {
 			return false, err
@@ -311,16 +450,19 @@ func (p *parser) tryParseCommonTags(tagBytes []byte) (bool, error) {
 			return false, fmt.Errorf("invalid output tag value at %s: %s", s.Context(), err)
 		}
 		filter := "N()."
-		if len(tagNameStr) == 1 {
-			switch tagNameStr {
-			case "s", "v", "q", "z", "j":
-				filter = "E()."
-			}
-		} else {
+		switch tagNameStr {
+		case "s", "v", "q", "z", "j", "sz", "qz", "jz":
+			filter = "E()."
+		}
+		if strings.HasSuffix(tagNameStr, "=") {
 			tagNameStr = tagNameStr[:len(tagNameStr)-1]
 		}
-		tagNameStr = strings.ToUpper(tagNameStr)
-		p.Printf("qw422016.%s%s(%s)", filter, tagNameStr, t.Value)
+		if tagNameStr == "f" && prec >= 0 {
+			p.Printf("qw%s.N().FPrec(%s, %d)", mangleSuffix, t.Value, prec)
+		} else {
+			tagNameStr = strings.ToUpper(tagNameStr)
+			p.Printf("qw%s.%s%s(%s)", mangleSuffix, filter, tagNameStr, t.Value)
+		}
 	case "=":
 		t, err := expectTagContents(s)
 		if err != nil {
@@ -330,16 +472,23 @@ func (p *parser) tryParseCommonTags(tagBytes []byte) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("error at %s: %s", s.Context(), err)
 		}
-		p.Printf("%s", f.CallStream("qw422016"))
+		p.Printf("%s", f.CallStream("qw"+mangleSuffix))
 	case "return":
-		if err := p.skipAfterTag("return"); err != nil {
+		if err := p.skipAfterTag(tagNameStr); err != nil {
 			return false, err
 		}
 	case "break":
-		if p.forDepth <= 0 {
-			return false, fmt.Errorf("found break tag outside for loop")
+		if p.forDepth <= 0 && p.switchDepth <= 0 {
+			return false, fmt.Errorf("found break tag outside for loop and switch block")
 		}
-		if err := p.skipAfterTag("break"); err != nil {
+		if err := p.skipAfterTag(tagNameStr); err != nil {
+			return false, err
+		}
+	case "continue":
+		if p.forDepth <= 0 {
+			return false, fmt.Errorf("found continue tag outside for loop")
+		}
+		if err := p.skipAfterTag(tagNameStr); err != nil {
 			return false, err
 		}
 	case "code":
@@ -354,10 +503,32 @@ func (p *parser) tryParseCommonTags(tagBytes []byte) (bool, error) {
 		if err := p.parseIf(); err != nil {
 			return false, err
 		}
+	case "switch":
+		if err := p.parseSwitch(); err != nil {
+			return false, err
+		}
 	default:
 		return false, nil
 	}
 	return true, nil
+}
+
+func splitTagNamePrec(tagName string) (string, int) {
+	parts := strings.Split(tagName, ".")
+	if len(parts) == 2 && parts[0] == "f" {
+		p := parts[1]
+		if strings.HasSuffix(p, "=") {
+			p = p[:len(p)-1]
+		}
+		if len(p) == 0 {
+			return "f", 0
+		}
+		prec, err := strconv.Atoi(p)
+		if err == nil && prec >= 0 {
+			return "f", prec
+		}
+	}
+	return tagName, -1
 }
 
 func (p *parser) skipAfterTag(tagStr string) error {
@@ -384,7 +555,7 @@ func (p *parser) skipAfterTag(tagStr string) error {
 				continue
 			}
 			switch string(t.Value) {
-			case "endfunc", "endfor", "endif", "else", "elseif":
+			case "endfunc", "endfor", "endif", "else", "elseif", "case", "default", "endswitch":
 				s.Rewind()
 				return nil
 			default:
@@ -440,8 +611,8 @@ func (p *parser) parseInterface() error {
 			return fmt.Errorf("when when parsing %q at %s: %s", methodStr, s.Context(), err)
 		}
 		p.Printf("%s string", methodStr)
-		p.Printf("%s", f.DefStream("qw422016"))
-		p.Printf("%s", f.DefWrite("qq422016"))
+		p.Printf("%s", f.DefStream("qw"+mangleSuffix))
+		p.Printf("%s", f.DefWrite("qq"+mangleSuffix))
 	}
 	p.prefix = ""
 	p.Printf("}")
@@ -491,17 +662,17 @@ func (p *parser) emitText(text []byte) {
 	for len(text) > 0 {
 		n := bytes.IndexByte(text, '`')
 		if n < 0 {
-			p.Printf("qw422016.N().S(`%s`)", text)
+			p.Printf("qw%s.N().S(`%s`)", mangleSuffix, text)
 			return
 		}
-		p.Printf("qw422016.N().S(`%s`)", text[:n])
-		p.Printf("qw422016.N().S(\"`\")")
+		p.Printf("qw%s.N().S(`%s`)", mangleSuffix, text[:n])
+		p.Printf("qw%s.N().S(\"`\")", mangleSuffix)
 		text = text[n+1:]
 	}
 }
 
 func (p *parser) emitFuncStart(f *funcType) {
-	p.Printf("func %s {", f.DefStream("qw422016"))
+	p.Printf("func %s {", f.DefStream("qw"+mangleSuffix))
 	p.prefix = "\t"
 }
 
@@ -509,21 +680,21 @@ func (p *parser) emitFuncEnd(f *funcType) {
 	p.prefix = ""
 	p.Printf("}\n")
 
-	p.Printf("func %s {", f.DefWrite("qq422016"))
+	p.Printf("func %s {", f.DefWrite("qq"+mangleSuffix))
 	p.prefix = "\t"
-	p.Printf("qw422016 := qt422016.AcquireWriter(qq422016)")
-	p.Printf("%s", f.CallStream("qw422016"))
-	p.Printf("qt422016.ReleaseWriter(qw422016)")
+	p.Printf("qw%s := qt%s.AcquireWriter(qq%s)", mangleSuffix, mangleSuffix, mangleSuffix)
+	p.Printf("%s", f.CallStream("qw"+mangleSuffix))
+	p.Printf("qt%s.ReleaseWriter(qw%s)", mangleSuffix, mangleSuffix)
 	p.prefix = ""
 	p.Printf("}\n")
 
 	p.Printf("func %s {", f.DefString())
 	p.prefix = "\t"
-	p.Printf("qb422016 := qt422016.AcquireByteBuffer()")
-	p.Printf("%s", f.CallWrite("qb422016"))
-	p.Printf("qs422016 := string(qb422016.B)")
-	p.Printf("qt422016.ReleaseByteBuffer(qb422016)")
-	p.Printf("return qs422016")
+	p.Printf("qb%s := qt%s.AcquireByteBuffer()", mangleSuffix, mangleSuffix)
+	p.Printf("%s", f.CallWrite("qb"+mangleSuffix))
+	p.Printf("qs%s := string(qb%s.B)", mangleSuffix, mangleSuffix)
+	p.Printf("qt%s.ReleaseByteBuffer(qb%s)", mangleSuffix, mangleSuffix)
+	p.Printf("return qs%s", mangleSuffix)
 	p.prefix = ""
 	p.Printf("}\n")
 }
@@ -541,7 +712,14 @@ func (p *parser) Printf(format string, args ...interface{}) {
 }
 
 func skipTagContents(s *scanner) error {
-	_, err := expectTagContents(s)
+	tagName := string(s.Token().Value)
+	t, err := expectTagContents(s)
+	if err != nil {
+		return err
+	}
+	if len(t.Value) > 0 {
+		return fmt.Errorf("unexpected extra value after %s: %q at %s", tagName, t.Value, s.Context())
+	}
 	return err
 }
 
@@ -574,6 +752,18 @@ func validateForStmt(stmt []byte) error {
 
 func validateIfStmt(stmt []byte) error {
 	exprStr := fmt.Sprintf("func () { if %s {} }", stmt)
+	_, err := goparser.ParseExpr(exprStr)
+	return err
+}
+
+func validateSwitchStmt(stmt []byte) error {
+	exprStr := fmt.Sprintf("func () { switch %s {} }", stmt)
+	_, err := goparser.ParseExpr(exprStr)
+	return err
+}
+
+func validateCaseStmt(stmt []byte) error {
+	exprStr := fmt.Sprintf("func () { switch {case %s:} }", stmt)
 	_, err := goparser.ParseExpr(exprStr)
 	return err
 }
